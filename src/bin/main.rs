@@ -17,7 +17,7 @@ use std::thread;
 
 fn main() {
 	let provider = DefaultAWSCredentialsProviderChain::new();
-	let region = Region::UsWest1; //Region::UsEast1;
+	let region = Region::UsWest2; //Region::UsEast1;
 
 	// Creates an SQS client with its own copy of the credential provider chain:
 	// let mut sqs = SQSHelper::new(provider.clone(), &region);
@@ -36,12 +36,12 @@ fn main() {
 	// }
 
 	// let mut bucket_name = format!("rusoto{}", get_time().sec);
-	let mut bucket_name = format!("rusoto1440823804"); // rusoto1440823804 didn't work 8/28/15 11:00 PM Pacific
+	let mut bucket_name = format!("rusoto1441045975"); // rusoto1440823804 didn't work 8/28/15 11:00 PM Pacific
 
-	// match s3_create_bucket_test(&mut s3, &bucket_name, &region, None) {
-	// 	Ok(_) => { println!("Everything worked for S3 create bucket."); },
-	// 	Err(err) => { println!("Got error in s3 create bucket: {:#?}", err); }
-	// }
+	match s3_create_bucket_test(&mut s3, &bucket_name, &region, None) {
+		Ok(_) => { println!("Everything worked for S3 create bucket in {:?}", region); },
+		Err(err) => { println!("Got error in s3 create bucket: {:#?}", err); }
+	}
 
 	thread::sleep_ms(100);
 	// bucket_name = format!("rusoto1440823804");
@@ -52,17 +52,17 @@ fn main() {
 		Err(err) => { println!("Got error in s3 put object: {:#?}", err); }
 	}
 	//
-	// match s3_get_object_test(&mut s3, &bucket_name) {
-	// 	Ok(result) => {
-	// 		println!("Everything worked for S3 get object.");
-	// 		let mut f = File::create("s3-sample-creds").unwrap();
-	// 		match f.write(&(result.body)) {
-	// 			Err(why) => println!("Couldn't create file to save object from S3: {}", why),
-	// 			Ok(_) => (),
-	// 		}
-	// 	}
-	// 	Err(err) => { println!("Got error in s3 get object: {:#?}", err); }
-	// }
+	match s3_get_object_test(&mut s3, &bucket_name) {
+		Ok(result) => {
+			println!("Everything worked for S3 get object.");
+			let mut f = File::create("s3-sample-creds").unwrap();
+			match f.write(&(result.body)) {
+				Err(why) => println!("Couldn't create file to save object from S3: {}", why),
+				Ok(_) => (),
+			}
+		}
+		Err(err) => { println!("Got error in s3 get object: {:#?}", err); }
+	}
 	// //
 	// match s3_delete_object_test(&mut s3, &bucket_name) {
 	// 	Ok(_) => {

@@ -11170,11 +11170,19 @@ impl<'a> S3Client<'a> {
 		request.set_hostname(Some(hostname));
 		request.set_payload(input.body);
 
-		let mut result = request.sign_and_execute(try!(self.creds.get_credentials()));
-		let status = result.status.to_u16();
+		let mut result = request.sign_and_execute_via_curl(try!(self.creds.get_credentials()));
+		println!("done with request");
+		let status = result.get_code();
 
 		match status {
 			200 => {
+				// let mut body = String::new();
+			    // result.read_to_string(&mut body).unwrap();
+				println!("Error: Status code was {}", status);
+			    println!("put obj response body: {}", result);
+
+
+
 				// parse headers for result:
 				let mut put_result = PutObjectOutput::default();
 
@@ -11182,9 +11190,9 @@ impl<'a> S3Client<'a> {
 			}
 			_ => {
 				println!("Error: Status code was {}", status);
-				let mut body = String::new();
-			    result.read_to_string(&mut body).unwrap();
-			    println!("Error response body: {}", body);
+				// let mut body = String::new();
+			    // result.read_to_string(&mut body).unwrap();
+			    println!("Error response body: {}", result);
 
 				Err(AWSError::new("error uploading object to S3"))
 			}
@@ -11644,6 +11652,7 @@ impl<'a> S3Client<'a> {
 			Some(ref canned_acl) => request.add_header("x-amz-acl", &canned_acl_in_aws_format(&canned_acl)),
 		}
 
+		println!("making create bucket request");
 		let result = request.sign_and_execute(try!(self.creds.get_credentials()));
 		let status = result.status.to_u16();
 

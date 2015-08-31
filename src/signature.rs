@@ -4,6 +4,9 @@ use hyper::Client;
 use hyper::client::Response;
 use hyper::header::Headers;
 use hyper::method::Method;
+use curl::http;
+// use curl::http::Response;
+use curl;
 use openssl::crypto::hash::Type::SHA256;
 use openssl::crypto::hash::hash;
 use openssl::crypto::hmac::hmac;
@@ -221,6 +224,216 @@ impl <'a> SignedRequest <'a> {
 
 	    result
 	}
+
+	/// Calculate the signature from the credentials provided and the request data
+	/// Add the calculated signature to the request headers and execute it
+	/// Return the hyper HTTP response
+	pub fn sign_and_execute_via_curl(&mut self, creds: &AWSCredentials) -> curl::http::Response {
+		let date = now_utc();
+
+		// set the required host/date headers
+		let hostname = match self.hostname {
+			Some(ref h) => h.to_string(),
+			None => build_hostname(&self.service, &self.region)
+		};
+
+		self.add_header("host", &hostname);
+		println!("set host to {}", hostname);
+		self.add_header("x-amz-date", &date.strftime("%Y%m%dT%H%M%SZ").unwrap().to_string());
+
+		if let Some(ref token) = *creds.get_token() {
+			self.add_header("X-Amz-Security-Token", token);
+		}
+
+		let canonical_query_string : String;
+		// let hyper_method;
+
+		// get the parameters in the right place for the http method being used
+		// TODO: handle PUT/DELTE/HEAD methods (with a matcher, not if/else if)
+		if self.method == "POST" {
+			canonical_query_string = build_canonical_query_string(&self.params);
+			// hyper_method = Method::Post;
+
+			// self.add_header("content-type", "application/x-www-form-urlencoded; charset=utf-8");
+		} else if self.method == "PUT" {
+			canonical_query_string = build_canonical_query_string(&self.params);
+			// hyper_method = Method::Put;
+
+			// self.add_header("content-type", "application/x-www-form-urlencoded; charset=utf-8");
+		} else if self.method == "DELETE" {
+			canonical_query_string = "".to_string();
+			// hyper_method = Method::Delete;
+
+			self.add_header("content-type", "application/x-www-form-urlencoded; charset=utf-8");
+		} else {
+			canonical_query_string =  build_canonical_query_string(&self.params);
+			// hyper_method = Method::Get;
+		}
+
+		// println!("canonical_query_string is {}", canonical_query_string);
+
+		// build the canonical request
+		let signed_headers = signed_headers(&self.headers);
+		let canonical_uri = canonical_uri(&self.path);
+		let canonical_headers = canonical_headers(&self.headers);
+
+		let mut canonical_request : String;
+
+		match self.payload {
+			None => {
+				canonical_request = format!("{}\n{}\n{}\n{}\n{}\n{}",
+					&self.method,
+					canonical_uri,
+					canonical_query_string,
+					canonical_headers,
+					signed_headers,
+					&to_hexdigest_from_string(""));
+				self.add_header("x-amz-content-sha256", &to_hexdigest_from_string(""));
+			}
+			Some(payload) => {
+				canonical_request = format!("{}\n{}\n{}\n{}\n{}\n{}",
+					&self.method,
+					canonical_uri,
+					canonical_query_string,
+					canonical_headers,
+					signed_headers,
+					&to_hexdigest_from_bytes(payload));
+				self.add_header("x-amz-content-sha256", &to_hexdigest_from_bytes(payload));
+				self.add_header("content-length", &format!("{}", payload.len()));
+				self.add_header("content-type", "application/octet-stream");
+				// println!("payload is {:?}", payload);
+			}
+		}
+
+		// use the hashed canonical request to build the string to sign
+		let hashed_canonical_request = to_hexdigest_from_string(&canonical_request);
+		// println!("hashed canonical request is {}", hashed_canonical_request);
+		let scope = format!("{}/{}/{}/aws4_request", date.strftime("%Y%m%d").unwrap(), region_in_aws_format(&self.region), &self.service);
+		let string_to_sign = string_to_sign(date, &hashed_canonical_request, &scope);
+
+		// construct the signing key and sign the string with it
+		let signing_key = signing_key(&creds.get_aws_secret_key(), date, &region_in_aws_format(&self.region), &self.service);
+		let signature = signature(&string_to_sign, signing_key);
+
+		// build the actual auth header
+		let auth_header = format!("AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+	               &creds.get_aws_access_key_id(), scope, signed_headers, signature);
+		self.add_header("authorization", &auth_header);
+
+		// translate the headers map to a format Hyper likes
+		// let mut hyper_headers = Headers::new();
+		// for h in self.headers.iter() {
+		// 	hyper_headers.set_raw(h.0.to_owned(), h.1.to_owned());
+		// }
+
+		// debug:
+		// for h in hyper_headers.iter() {
+		// 	println!("header key:val: {:?}:{:?}", h.name(), h.value_string());
+		// }
+
+		// println!("Canonical url is {}", canonical_uri);
+		let mut final_uri = format!("https://{}{}", hostname, canonical_uri);
+		if canonical_query_string.len() > 0 {
+			final_uri = final_uri + &format!("?{}", canonical_query_string);
+		}
+
+		// S3 can be tricky, signature is against us-east-1 for now.  To verify:
+		println!("Region is {}", region_in_aws_format(&self.region));
+		// println!("Full request: \n method: {}\n final_uri: {}\n payload: {:?}\n canon headers: {:?}\n",
+		// 	self.method, final_uri, self.payload, canonical_headers);
+
+	    // execute the request already
+	    // let client = Client::new();
+
+		let mut resp : curl::http::Response;
+
+		match self.method.as_ref() {
+			"POST" => {
+				let mut bleh = http::handle();
+				let mut req = bleh.post(final_uri, self.payload.unwrap());
+				for h in self.headers.iter() {
+					  let mut header_val = String::new();
+					  for v in h.1 {
+						  header_val = header_val + &str::from_utf8(v).unwrap()
+					  }
+					  req = req.header(&h.0.to_string(), &header_val);
+				  }
+
+				resp = req.exec().unwrap();
+			}
+			"DELETE" => {
+				let mut bleh = http::handle();
+				let mut req = bleh.delete(final_uri);
+				for h in self.headers.iter() {
+					  let mut header_val = String::new();
+					  for v in h.1 {
+						  header_val = header_val + &str::from_utf8(v).unwrap()
+					  }
+					  req = req.header(&h.0.to_string(), &header_val);
+				  }
+
+				resp = req.exec().unwrap();
+			}
+			"PUT" => {
+				let mut bleh = http::handle();
+				let mut req = bleh.put(final_uri, self.payload.unwrap()); //.follow_redirects(true);
+				for h in self.headers.iter() {
+					  let mut header_val = String::new();
+					  for v in h.1 {
+						  header_val = header_val + &str::from_utf8(v).unwrap()
+					  }
+					  req = req.header(&h.0.to_string(), &header_val);
+				  }
+
+					// 	println!("request: {}", req);
+
+					match req.exec() {
+						Ok(response) => {
+							println!("all good in response.");
+							resp = response;
+						}
+						Err(why) => {
+							println!("went south on request: {}", why);
+							panic!("booo");
+						}
+					}
+			}
+			_ => {
+				let mut bleh = http::handle();
+				let mut req = bleh.get(final_uri);
+				for h in self.headers.iter() {
+					  let mut header_val = String::new();
+					  for v in h.1 {
+						  header_val = header_val + &str::from_utf8(v).unwrap()
+					  }
+					  req = req.header(&h.0.to_string(), &header_val);
+				  }
+
+				resp = req.exec().unwrap();
+			}
+		}
+		println!("resp is {}", resp);
+
+		// Set to mut for debug:
+		// let mut result : Response;
+		//
+	    // match self.payload {
+		// 	None => result = client.request(hyper_method, &final_uri).headers(hyper_headers).body("").send().unwrap(),
+		// 	Some(payload_contents) => {
+		// 		result = client.request(hyper_method, &final_uri).headers(hyper_headers).body(payload_contents).send().unwrap()
+		// 	}
+		// }
+
+		// Debug:
+		// let mut body = String::new();
+	    // result.read_to_string(&mut body).unwrap();
+	    // println!("Response: {}", body);
+		// /Debug
+
+	    // panic!("lol no request resposne");
+		resp
+	}
+
 }
 
 fn signature(string_to_sign: &str, signing_key: Vec<u8>) -> String {
@@ -332,7 +545,6 @@ fn to_hexdigest_from_string(val: &str) -> String {
 
 fn to_hexdigest_from_bytes(val: &[u8]) -> String {
 	let h = hash(SHA256, val);
-	println!("Hex encoded: {}", h.to_hex().to_string());
     h.to_hex().to_string()
 }
 
