@@ -30,6 +30,7 @@ pub struct SignedRequest<'a> {
 	params: Params,
 	hostname: Option<String>,
 	payload: Option<&'a [u8]>,
+	content_type: Option<String>,
 	canonical_query_string: String,
 	canonical_uri: String,
 }
@@ -46,9 +47,14 @@ impl <'a> SignedRequest <'a> {
 			params: Params::new(),
 			hostname: None,
 			payload: None,
+			content_type: None,
 			canonical_query_string: String::new(),
 			canonical_uri: String::new(),
 		 }
+	}
+
+	pub fn set_content_type(&mut self, content_type: String) {
+		self.content_type = Some(content_type);
 	}
 
 	pub fn set_hostname(&mut self, hostname: Option<String>) {
@@ -166,7 +172,13 @@ impl <'a> SignedRequest <'a> {
 				self.add_header("content-length", &format!("{}", payload.len()));
 			}
 		}
-		self.add_header("content-type", "application/octet-stream");
+
+		let content_type = match self.content_type {
+			Some(ref ct) => ct.to_string(),
+			None => "application/octet-stream".to_string()
+		};
+
+		self.add_header("content-type", &content_type);
 
 
 		// use the hashed canonical request to build the string to sign
