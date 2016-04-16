@@ -87,6 +87,8 @@ pub mod elastictranscoder;
 pub mod events;
 #[cfg(feature = "firehose")]
 pub mod firehose;
+#[cfg(feature = "iam")]
+pub mod iam;
 #[cfg(feature = "inspector")]
 pub mod inspector;
 #[cfg(feature = "iot")]
