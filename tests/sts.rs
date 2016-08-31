@@ -14,15 +14,15 @@ fn main() {
     let sts = StsClient::new(credentials, Region::UsEast1);
 
     // http://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html
-    match sts.assume_role(&AssumeRoleRequest::default()) {
-        Ok(clusters) => {
-            for arn in clusters.cluster_arns.unwrap_or(vec![]) {
-                println!("arn -> {:?}", arn);
-            }
-        },
-        Err(err) => {
-            panic!("Error assuming role {:#?}", err);
-        }
+    match sts.assume_role(&AssumeRoleRequest{
+            role_arn: "bogus".to_owned(),
+            role_session_name: "rusoto_test_session".to_owned(),
+            ..Default::default()
+        }) {
+        Err(AssumeRoleError::Unknown(msg)) =>
+            assert!(msg.contains("validation error detected: Value 'bogus' at 'roleArn' failed to satisfy constraint")),
+        err =>
+            panic!("this should have been an Unknown STSError: {:?}", err)
     }
 
     match sts.get_session_token(
@@ -30,9 +30,10 @@ fn main() {
             token_code: Some("bogus".to_owned()),
             ..Default::default()
         }) {
-        Err(GetSessionTokenError::InvalidParameter(msg)) => 
-            assert!(msg.contains("Invalid TokenCode bogus")),
-        _ => 
-            panic!("this should have been an InvalidParameterException STSError")
+        Err(GetSessionTokenError::Unknown(msg)) =>
+        panic!("blah: {:#?}", msg), 
+            //assert!(msg.contains("Invalid TokenCode bogus")),
+        err => 
+            panic!("this should have been an Unknown STSError: {:?}", err)
     }
 }
