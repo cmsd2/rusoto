@@ -21,13 +21,13 @@ version = ">= 0.2.5"
 [dependencies]
 chrono = "0.2.21"
 hyper = "0.9.10"
-log = "0.3.6"
+log = "0.3.2"
 openssl = "0.7.9"
 regex = "0.1.65"
-rustc-serialize = "0.3.19"
+rustc-serialize = "0.3.16"
 serde = "0.8.0"
 serde_json = "0.8.0"
-time = "0.1.35"
+time = "0.1.32"
 url = "1.2.0"
 xml-rs = "0.1.26"
 
@@ -44,7 +44,7 @@ env_logger = "0.3.3"
 rand = "^0.3.14"
 
 [features]
-all = ["acm", "cloudhsm", "cloudtrail", "codecommit", "codedeploy", "codepipeline", "cognito-identity", "config", "datapipeline", "devicefarm", "directconnect", "ds", "dynamodb", "dynamodbstreams", "firehose", "ec2", "ecr", "ecs", "emr", "elastictranscoder", "events", "iam", "inspector", "iot", "kinesis", "kms", "logs", "machinelearning", "marketplacecommerceanalytics", "opsworks", "route53domains", "s3", "sqs", "ssm", "storagegateway", "swf", "waf", "workspaces"]
+all = ["acm", "cloudhsm", "cloudtrail", "codecommit", "codedeploy", "codepipeline", "cognito-identity", "config", "datapipeline", "devicefarm", "directconnect", "ds", "dynamodb", "dynamodbstreams", "firehose", "ec2", "ecr", "ecs", "emr", "elastictranscoder", "events", "iam", "inspector", "iot", "kinesis", "kms", "logs", "machinelearning", "marketplacecommerceanalytics", "opsworks", "route53domains", "s3", "sqs", "ssm", "storagegateway", "sts", "swf", "waf", "workspaces"]
 acm = []
 cloudhsm = []
 cloudtrail = []
@@ -82,6 +82,7 @@ s3 = []
 sqs = []
 ssm = []
 storagegateway = []
+sts = []
 swf = []
 unstable = ["serde_macros", "rusoto_codegen/unstable"]
 waf = []
