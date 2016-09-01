@@ -4,7 +4,7 @@ extern crate rusoto;
 
 use rusoto::sts::StsClient;
 use rusoto::sts::{AssumeRoleRequest, AssumeRoleError};
-use rusoto::sts::{GetSessionTokenRequest, GetSessionTokenError};
+use rusoto::sts::{GetSessionTokenRequest};
 use rusoto::{DefaultCredentialsProvider, Region};
 
 #[test]
@@ -27,13 +27,12 @@ fn main() {
 
     match sts.get_session_token(
         &GetSessionTokenRequest {
-            token_code: Some("bogus".to_owned()),
+            token_code: Some("unused".to_owned()),
             ..Default::default()
         }) {
-        Err(GetSessionTokenError::Unknown(msg)) =>
-        panic!("blah: {:#?}", msg), 
-            //assert!(msg.contains("Invalid TokenCode bogus")),
+        Ok(tok) =>
+            assert!(tok.credentials.is_some()),
         err => 
-            panic!("this should have been an Unknown STSError: {:?}", err)
+            panic!("this should have been a Session Token: {:?}", err)
     }
 }
