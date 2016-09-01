@@ -17,6 +17,6 @@ fn main() {
             ..Default::default()
         }) {
         err =>
-            panic!("error: {}", err)
+            panic!("error: {:?}", err)
     }
 }
