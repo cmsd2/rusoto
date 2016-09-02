@@ -14,12 +14,16 @@ use std::ascii::AsciiExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::cell::RefCell;
+use std::str::FromStr;
 use hyper::Client;
 use hyper::header::Connection;
 use regex::Regex;
 use chrono::{Duration, UTC, DateTime, ParseError};
 use serde_json::{Value, from_str};
 use std::time::Duration as StdDuration;
+use ini::Ini;
+use ini::ini;
+use region;
 
 /// AWS API access credentials, including access key, secret key, token (for IAM profiles), and
 /// expiration timestamp.
@@ -109,6 +113,17 @@ impl From<IoError> for CredentialsError {
     }
 }
 
+impl From<ini::Error> for CredentialsError {
+    fn from(err: ini::Error) -> CredentialsError {
+        CredentialsError::new(err.description())
+    }
+}
+
+impl From<region::ParseRegionError> for CredentialsError {
+    fn from(err: region::ParseRegionError) -> CredentialsError {
+        CredentialsError::new(err.description())
+    }
+}
 
 /// A trait for types that produce `AwsCredentials`.
 pub trait ProvideAwsCredentials {
@@ -160,6 +175,7 @@ fn credentials_from_environment() -> Result<AwsCredentials, CredentialsError> {
 pub struct ProfileProvider {
     credentials: Option<AwsCredentials>,
     file_path: PathBuf,
+    config_file_path: PathBuf,
     profile: String,
 }
 
@@ -169,31 +185,33 @@ impl ProfileProvider {
         // Default credentials file location:
         // ~/.aws/credentials (Linux/Mac)
         // %USERPROFILE%\.aws\credentials  (Windows)
-        let profile_location = match env::home_dir() {
-            Some(home_path) => {
-                let mut credentials_path = PathBuf::from(".aws");
-
-                credentials_path.push("credentials");
-
-                home_path.join(credentials_path)
-            }
+        let dot_aws_location = match env::home_dir() {
+            Some(home_path) => home_path.join(PathBuf::from(".aws")),
             None => return Err(CredentialsError::new("The environment variable HOME must be set.")),
         };
+
+        let mut profile_location = dot_aws_location.clone();
+        profile_location.push("credentials");
+
+        let mut config_location = dot_aws_location.clone();
+        config_location.push("config");
 
         Ok(ProfileProvider {
             credentials: None,
             file_path: profile_location,
+            config_file_path: config_location,
             profile: "default".to_owned(),
         })
     }
 
     /// Create a new `ProfileProvider` for the credentials file at the given path, using
     /// the given profile.
-    pub fn with_configuration<F, P>(file_path: F, profile: P) -> ProfileProvider
-    where F: Into<PathBuf>, P: Into<String> {
+    pub fn with_configuration<F, C, P>(file_path: F, config_file_path: C, profile: P) -> ProfileProvider
+    where F: Into<PathBuf>, C: Into<PathBuf>, P: Into<String> {
         ProfileProvider {
             credentials: None,
             file_path: file_path.into(),
+            config_file_path: config_file_path.into(),
             profile: profile.into(),
         }
     }
@@ -201,6 +219,11 @@ impl ProfileProvider {
     /// Get a reference to the credentials file path.
     pub fn file_path(&self) -> &Path {
         self.file_path.as_ref()
+    }
+
+    /// Get a reference to the config file path.
+    pub fn config_file_path(&self) -> &Path {
+        self.config_file_path.as_ref()
     }
 
     /// Get a reference to the profile name.
@@ -213,6 +236,11 @@ impl ProfileProvider {
         self.file_path = file_path.into();
     }
 
+    /// Set the credentials file path.
+    pub fn set_config_file_path<F>(&mut self, config_file_path: F) where F: Into<PathBuf> {
+        self.config_file_path = config_file_path.into();
+    }
+
     /// Set the profile name.
     pub fn set_profile<P>(&mut self, profile: P) where P: Into<String> {
         self.profile = profile.into();
@@ -221,8 +249,16 @@ impl ProfileProvider {
 
 impl ProvideAwsCredentials for ProfileProvider {
     fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
+        let config = try!(parse_config_file(self.config_file_path()));
+
+        let mut profile_name: Option<&str> = config.profiles.get(self.profile()).and_then(|p| {
+            p.source_profile.as_ref().map(|s| &s[..])
+        });
+
+        profile_name = profile_name.or_else(|| Some(self.profile()));
+
     	parse_credentials_file(self.file_path()).and_then(|mut profiles| {
-            profiles.remove(self.profile()).ok_or(CredentialsError::new("profile not found"))
+            profiles.remove(profile_name.unwrap()).ok_or(CredentialsError::new("profile not found"))
     	})
    }
 }
@@ -305,6 +341,188 @@ fn parse_credentials_file(file_path: &Path) -> Result<HashMap<String, AwsCredent
 
     Ok(profiles)
 }
+
+pub trait LoadFromPath where Self: Sized {
+    type Error: Sized + 'static;
+
+    fn load_from_path(filename: &Path) -> Result<Self, Self::Error>;
+}
+
+impl LoadFromPath for Ini {
+    type Error = ini::Error;
+
+    fn load_from_path(filename: &Path) -> Result<Ini, Self::Error> {
+        let mut reader = match File::open(filename) {
+            Err(e) => {
+                return Err(ini::Error {
+                    line: 0,
+                    col: 0,
+                    msg: format!("Unable to open `{:?}`: {}", filename, e),
+                })
+            }
+            Ok(r) => r,
+        };
+        Ini::read_from(&mut reader)
+    }
+}
+
+pub struct ConfigProfile {
+    pub role_arn: Option<String>,
+    pub source_profile: Option<String>,
+    pub region: Option<region::Region>,
+}
+
+pub struct Config {
+    pub default_region: Option<region::Region>,
+    pub profiles: HashMap<String, ConfigProfile>,
+}
+
+fn get_profile_name_from_section_name(section_name: &str) -> Option<String> {
+    let prefix = "profile ";
+    if section_name.starts_with(prefix) {
+        Some(section_name.chars().skip(prefix.len()).collect())
+    } else {
+        None
+    }
+}
+
+fn parse_config_file(file_path: &Path) -> Result<Config, CredentialsError> {
+    let ini = try!(Ini::load_from_path(file_path));
+
+    let default_section = ini.section(Some("default".to_owned()));
+    let maybe_default_region_name = default_section.and_then(|s| s.get("region"));
+    let default_region = if let Some(default_region_name) = maybe_default_region_name {
+        Some(try!(region::Region::from_str(default_region_name)))
+    } else {
+        None
+    };
+
+    let mut profiles = HashMap::new();
+
+    for key in ini.sections() {
+        if let Some(section_name) = key.as_ref() {  
+            let section = ini.section(key.to_owned()).unwrap();
+
+            if let Some(profile_name) = get_profile_name_from_section_name(section_name) {
+                let maybe_region_name = section.get("region");
+                let region = if let Some(region_name) = maybe_region_name {
+                    Some(try!(region::Region::from_str(region_name)))
+                } else {
+                    None
+                };
+                let source_profile = section.get("source_profile").map(|s| s.to_owned());
+                let role_arn = section.get("role_arn").map(|s| s.to_owned());
+
+                profiles.insert(profile_name, ConfigProfile {
+                    role_arn: role_arn,
+                    source_profile: source_profile,
+                    region: region,
+                });
+            }
+        }
+    }
+
+    Ok(Config {
+        default_region: default_region,
+        profiles: profiles,
+    })
+}
+
+#[cfg(feature = "sts")]
+mod sts {
+    use super::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
+    use ::sts::StsClient;
+    use ::Region;
+    use std::path::{Path, PathBuf};
+
+    /// Provides AWS credentials from Secure Token Service
+    #[derive(Clone, Debug)]
+    pub struct StsProvider<P> where P: ProvideAwsCredentials + Clone {
+        base_provider: P,
+        config_file_path: Option<PathBuf>,
+        region: Option<Region>,
+        role_arn: Option<String>,
+        profile: Option<String>,
+    }
+
+    impl <P> StsProvider<P> where P: ProvideAwsCredentials + Clone {
+        pub fn new(base_provider: P) -> StsProvider<P> {
+            StsProvider {
+                base_provider: base_provider,
+                region: None,
+                role_arn: None,
+                profile: None,
+                config_file_path: None,
+            }
+        }
+
+        pub fn get_region(&self) -> Option<Region> {
+            self.region
+        }
+
+        pub fn set_region(&mut self, region: Option<Region>) {
+            self.region = region;
+        }
+
+        pub fn get_role_arn(&self) -> Option<&str> {
+            self.role_arn.as_ref().map(|s| &s[..])
+        }
+
+        pub fn set_role_arn(&mut self, role_arn: Option<String>) {
+            self.role_arn = role_arn;
+        }
+
+        pub fn get_profile(&self) -> Option<&str> {
+            self.profile.as_ref().map(|s| &s[..])
+        }
+
+        /// Set the profile name.
+        pub fn set_profile(&mut self, profile: Option<String>) {
+            self.profile = profile;
+        }
+
+        pub fn get_config_file_path(&self) -> Option<&Path> {
+            self.config_file_path.as_ref().map(|p| p.as_ref())
+        }
+
+        /// Set the credentials file path.
+        pub fn set_config_file_path(&mut self, config_file_path: Option<PathBuf>) {
+            self.config_file_path = config_file_path.into();
+        }
+    }
+
+    impl <P> ProvideAwsCredentials for StsProvider<P> where P: ProvideAwsCredentials + Clone {
+        fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
+            // read ~/.aws/config
+            let file_path = try!(self.config_file_path.as_ref().ok_or(CredentialsError::new("No StsProvider config_file_path set.")));
+            let config = try!(super::parse_config_file(&file_path));
+
+            // get default region
+            let default_region = config.default_region;
+            // get profile
+            let profile_name = try!(self.profile.as_ref().ok_or(CredentialsError::new("No StsProvider profile set.")));
+            let profile = try!(config.profiles.get(profile_name).ok_or(CredentialsError::new("StsProvider profile not found in config")));
+            // get region override from profile?
+            let region = self.region.or_else(|| profile.region).or_else(|| default_region).unwrap_or(Region::UsEast1);
+            // get source_profile from profile
+            let source_profile = profile.source_profile;
+            // get role_arn
+            let role_arn = profile.role_arn;
+            // set source_profile on base_provider
+            // create client
+            // assume role
+            // get session token 
+            let region = unimplemented!();
+
+            let client = StsClient::new(self.base_provider.clone(), region);
+
+            unimplemented!()
+        }
+    }
+}
+
+#[cfg(feature = "sts")]
+pub use self::sts::*;
 
 /// Provides AWS credentials from a resource's IAM role.
 pub struct IamProvider;

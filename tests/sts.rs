@@ -30,8 +30,9 @@ fn main() {
             token_code: Some("unused".to_owned()),
             ..Default::default()
         }) {
-        Ok(tok) =>
-            assert!(tok.credentials.is_some()),
+        Ok(tok) => {
+            println!("{:?}", tok);
+            assert!(tok.credentials.is_some()) },
         err => 
             panic!("this should have been a Session Token: {:?}", err)
     }

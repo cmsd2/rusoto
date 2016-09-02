@@ -54,6 +54,7 @@ extern crate serde_json;
 extern crate time;
 extern crate url;
 extern crate xml;
+extern crate ini;
 
 pub use credential::{
     AwsCredentials,
