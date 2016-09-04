@@ -65,7 +65,12 @@ pub use credential::{
     ProvideAwsCredentials,
     DefaultCredentialsProvider,
     DefaultCredentialsProviderSync,
+    CredentialsError,
 };
+
+#[cfg(feature = "sts")]
+pub use credential::StsProvider;
+
 pub use region::{ParseRegionError, Region};
 pub use request::{DispatchSignedRequest, HttpResponse, HttpDispatchError};
 

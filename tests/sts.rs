@@ -6,6 +6,7 @@ use rusoto::sts::StsClient;
 use rusoto::sts::{AssumeRoleRequest, AssumeRoleError};
 use rusoto::sts::{GetSessionTokenRequest};
 use rusoto::{DefaultCredentialsProvider, Region};
+use rusoto::{StsProvider, ProvideAwsCredentials};
 
 #[test]
 fn main() {
@@ -31,9 +32,15 @@ fn main() {
             ..Default::default()
         }) {
         Ok(tok) => {
-            println!("{:?}", tok);
             assert!(tok.credentials.is_some()) },
         err => 
             panic!("this should have been a Session Token: {:?}", err)
+    }
+
+    let sts_creds_provider = StsProvider::new(DefaultCredentialsProvider::new().unwrap()).unwrap();
+
+    match sts_creds_provider.credentials() {
+        Err(e) => panic!("sts credentials provider error: {:?}", e),
+        Ok(r) => println!("sts credentials provider result: {:?}", r)
     }
 }

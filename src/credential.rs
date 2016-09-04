@@ -82,9 +82,9 @@ pub struct CredentialsError{
 }
 
 impl CredentialsError {
-    fn new(message: &str) -> CredentialsError {
+    fn new<S>(message: S) -> CredentialsError where S: Into<String> {
         CredentialsError {
-            message: message.to_string()
+            message: message.into()
         }
     }
 }
@@ -132,6 +132,7 @@ pub trait ProvideAwsCredentials {
 }
 
 /// Provides AWS credentials from environment variables.
+#[derive(Debug, Clone)]
 pub struct EnvironmentProvider;
 
 impl ProvideAwsCredentials for EnvironmentProvider {
@@ -182,19 +183,8 @@ pub struct ProfileProvider {
 impl ProfileProvider {
     /// Create a new `ProfileProvider` for the default credentials file path and profile name.
     pub fn new() -> Result<ProfileProvider, CredentialsError> {
-        // Default credentials file location:
-        // ~/.aws/credentials (Linux/Mac)
-        // %USERPROFILE%\.aws\credentials  (Windows)
-        let dot_aws_location = match env::home_dir() {
-            Some(home_path) => home_path.join(PathBuf::from(".aws")),
-            None => return Err(CredentialsError::new("The environment variable HOME must be set.")),
-        };
-
-        let mut profile_location = dot_aws_location.clone();
-        profile_location.push("credentials");
-
-        let mut config_location = dot_aws_location.clone();
-        config_location.push("config");
+        let profile_location = try!(Self::default_credentials_path());
+        let config_location = try!(Self::default_config_path());
 
         Ok(ProfileProvider {
             credentials: None,
@@ -202,6 +192,30 @@ impl ProfileProvider {
             config_file_path: config_location,
             profile: "default".to_owned(),
         })
+    }
+
+    pub fn default_dot_aws_location() -> Result<PathBuf, CredentialsError> {
+         // Default credentials file location:
+        // ~/.aws/credentials (Linux/Mac)
+        // %USERPROFILE%\.aws\credentials  (Windows)
+        match env::home_dir() {
+            Some(home_path) => Ok(home_path.join(PathBuf::from(".aws"))),
+            None => Err(CredentialsError::new("The environment variable HOME must be set.")),
+        }
+    }
+
+    pub fn default_credentials_path() -> Result<PathBuf, CredentialsError> {
+        let dot_aws_location = try!(Self::default_dot_aws_location());
+        let mut profile_location = dot_aws_location.clone();
+        profile_location.push("credentials");
+        Ok(profile_location)
+    }
+
+    pub fn default_config_path() -> Result<PathBuf, CredentialsError> {
+        let dot_aws_location = try!(Self::default_dot_aws_location());
+        let mut profile_location = dot_aws_location.clone();
+        profile_location.push("config");
+        Ok(profile_location)
     }
 
     /// Create a new `ProfileProvider` for the credentials file at the given path, using
@@ -366,12 +380,14 @@ impl LoadFromPath for Ini {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ConfigProfile {
     pub role_arn: Option<String>,
     pub source_profile: Option<String>,
     pub region: Option<region::Region>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub default_region: Option<region::Region>,
     pub profiles: HashMap<String, ConfigProfile>,
@@ -430,13 +446,32 @@ fn parse_config_file(file_path: &Path) -> Result<Config, CredentialsError> {
 
 #[cfg(feature = "sts")]
 mod sts {
-    use super::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
-    use ::sts::StsClient;
+    use super::{AwsCredentials, CredentialsError, ProvideAwsCredentials, ProfileProvider};
+    use ::sts::{AssumeRoleRequest, GetSessionTokenRequest, StsClient};
     use ::Region;
     use std::path::{Path, PathBuf};
+    use hyper::Client;
+    use chrono::*;
+
+    pub trait NewAwsCredsForStsCreds {
+        fn new_for_credentials(sts_creds: ::sts::Credentials) -> Result<AwsCredentials, CredentialsError>;
+    }
+
+    impl NewAwsCredsForStsCreds for AwsCredentials {
+        fn new_for_credentials(sts_creds: ::sts::Credentials) -> Result<AwsCredentials, CredentialsError> {
+            let expires_at = try!(sts_creds.expiration.parse::<DateTime<UTC>>().map_err(|e|
+                CredentialsError::new(format!("error parsing credentials expiry: {}", e))));
+
+            Ok(AwsCredentials::new(
+                sts_creds.access_key_id, 
+                sts_creds.secret_access_key, 
+                Some(sts_creds.session_token), 
+                expires_at))
+        }
+    }
 
     /// Provides AWS credentials from Secure Token Service
-    #[derive(Clone, Debug)]
+    #[derive(Debug, Clone)]
     pub struct StsProvider<P> where P: ProvideAwsCredentials + Clone {
         base_provider: P,
         config_file_path: Option<PathBuf>,
@@ -445,15 +480,29 @@ mod sts {
         profile: Option<String>,
     }
 
+    // impl <P> Clone for StsProvider<P> where P: ProvideAwsCredentials + Clone {
+    //     fn clone(&self) -> StsProvider<P> {
+    //         StsProvider {
+    //             base_provider: self.base_provider.clone(),
+    //             config_file_path: self.config_file_path.clone(),
+    //             region: self.region.clone(),
+    //             role_arn: self.role_arn.clone(),
+    //             profile: self.profile.clone(),
+    //         }
+    //     }
+    // }
+
     impl <P> StsProvider<P> where P: ProvideAwsCredentials + Clone {
-        pub fn new(base_provider: P) -> StsProvider<P> {
-            StsProvider {
+        pub fn new(base_provider: P) -> Result<StsProvider<P>, CredentialsError> {
+            let config_file_path = try!(ProfileProvider::default_config_path());
+
+            Ok(StsProvider {
                 base_provider: base_provider,
                 region: None,
                 role_arn: None,
                 profile: None,
-                config_file_path: None,
-            }
+                config_file_path: Some(config_file_path),
+            })
         }
 
         pub fn get_region(&self) -> Option<Region> {
@@ -489,6 +538,40 @@ mod sts {
         pub fn set_config_file_path(&mut self, config_file_path: Option<PathBuf>) {
             self.config_file_path = config_file_path.into();
         }
+        
+        pub fn assume_role<R,S>(client: &StsClient<P,Client>, role_arn: R, session_name: S) -> Result<AwsCredentials, CredentialsError> 
+                where R: Into<String>, S: Into<String> {
+            match client.assume_role(&AssumeRoleRequest{
+                role_arn: role_arn.into(),
+                role_session_name: session_name.into(),
+                ..Default::default()
+            }) {
+                Err(err) =>
+                    Err(CredentialsError::new(format!("Sts AssumeRoleError: {:?}", err))),
+                Ok(resp) => {
+                    let creds = try!(resp.credentials.ok_or(CredentialsError::new("no credentials in response")));
+                    
+                    AwsCredentials::new_for_credentials(creds)
+                }
+            }
+        }
+
+        pub fn get_session_token<S>(client: &StsClient<P,Client>, code: Option<S>) -> Result<AwsCredentials, CredentialsError> 
+                where S: Into<String> {
+            match client.get_session_token(
+                &GetSessionTokenRequest {
+                    token_code: code.map(|s| s.into()),
+                    ..Default::default()
+                }) {
+                Ok(resp) => {
+                    let creds = try!(resp.credentials.ok_or(CredentialsError::new("no credentials in response")));
+
+                    AwsCredentials::new_for_credentials(creds)
+                },
+                err => 
+                    Err(CredentialsError::new(format!("StsProvider get_session_token error: {:?}", err)))
+            }
+        }
     }
 
     impl <P> ProvideAwsCredentials for StsProvider<P> where P: ProvideAwsCredentials + Clone {
@@ -496,27 +579,34 @@ mod sts {
             // read ~/.aws/config
             let file_path = try!(self.config_file_path.as_ref().ok_or(CredentialsError::new("No StsProvider config_file_path set.")));
             let config = try!(super::parse_config_file(&file_path));
-
-            // get default region
             let default_region = config.default_region;
-            // get profile
-            let profile_name = try!(self.profile.as_ref().ok_or(CredentialsError::new("No StsProvider profile set.")));
-            let profile = try!(config.profiles.get(profile_name).ok_or(CredentialsError::new("StsProvider profile not found in config")));
-            // get region override from profile?
-            let region = self.region.or_else(|| profile.region).or_else(|| default_region).unwrap_or(Region::UsEast1);
-            // get source_profile from profile
-            let source_profile = profile.source_profile;
-            // get role_arn
-            let role_arn = profile.role_arn;
-            // set source_profile on base_provider
-            // create client
-            // assume role
-            // get session token 
-            let region = unimplemented!();
 
+            // get named profile if any or default profile if present
+            let profile: Option<&::credential::ConfigProfile>;
+            if let Some(ref profile_name) = self.profile {
+                profile = Some(try!(config.profiles.get(profile_name)
+                    .ok_or(CredentialsError::new("StsProvider profile not found in config"))));
+            } else {
+                profile = config.profiles.get("default");
+            }
+
+            // get region from profile unless overridden
+            let region = self.region
+                .or_else(|| profile.and_then(|p| p.region))
+                .or_else(|| default_region)
+                .unwrap_or(Region::UsEast1);
+            
+            // get role_arn from profile
+            let maybe_role_arn = profile.and_then(|p| p.role_arn.as_ref());
+            
             let client = StsClient::new(self.base_provider.clone(), region);
 
-            unimplemented!()
+            if let Some(role_arn) = maybe_role_arn {
+                Self::assume_role(&client, &role_arn[..], "rusoto_test_session")
+            } else {
+                let maybe_code: Option<&str> = None;
+                Self::get_session_token(&client, maybe_code)
+            }
         }
     }
 }
@@ -525,6 +615,7 @@ mod sts {
 pub use self::sts::*;
 
 /// Provides AWS credentials from a resource's IAM role.
+#[derive(Debug, Clone)]
 pub struct IamProvider;
 
 impl ProvideAwsCredentials for IamProvider {
@@ -602,6 +693,15 @@ impl ProvideAwsCredentials for IamProvider {
 pub struct BaseAutoRefreshingProvider<P, T> {
 	credentials_provider: P,
 	cached_credentials: T
+}
+
+impl <P,T> Clone for BaseAutoRefreshingProvider<P,T> where P: Clone, T: Clone {
+    fn clone(&self) -> BaseAutoRefreshingProvider<P,T> {
+        BaseAutoRefreshingProvider {
+            credentials_provider: self.credentials_provider.clone(),
+            cached_credentials: self.cached_credentials.clone(),
+        }
+    }
 }
 
 /// Threadsafe `AutoRefreshingProvider` that locks cached credentials with a `Mutex`
