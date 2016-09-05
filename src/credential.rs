@@ -478,6 +478,7 @@ mod sts {
         region: Option<Region>,
         role_arn: Option<String>,
         profile: Option<String>,
+        session_name: Option<String>,
     }
 
     // impl <P> Clone for StsProvider<P> where P: ProvideAwsCredentials + Clone {
@@ -502,6 +503,7 @@ mod sts {
                 role_arn: None,
                 profile: None,
                 config_file_path: Some(config_file_path),
+                session_name: None,
             })
         }
 
@@ -539,6 +541,18 @@ mod sts {
             self.config_file_path = config_file_path.into();
         }
         
+        pub fn get_session_name(&self) -> Option<&str> {
+            self.session_name.as_ref().map(|s| &s[..])
+        }
+
+        pub fn set_session_name(&mut self, session_name: Option<String>) {
+            self.session_name = session_name;
+        }
+
+        pub fn default_session_name() -> &'static str {
+            "rusoto"
+        }
+
         pub fn assume_role<R,S>(client: &StsClient<P,Client>, role_arn: R, session_name: S) -> Result<AwsCredentials, CredentialsError> 
                 where R: Into<String>, S: Into<String> {
             match client.assume_role(&AssumeRoleRequest{
@@ -601,8 +615,10 @@ mod sts {
             
             let client = StsClient::new(self.base_provider.clone(), region);
 
+            let session_name = self.get_session_name().unwrap_or(Self::default_session_name());
+
             if let Some(role_arn) = maybe_role_arn {
-                Self::assume_role(&client, &role_arn[..], "rusoto_test_session")
+                Self::assume_role(&client, &role_arn[..], session_name)
             } else {
                 let maybe_code: Option<&str> = None;
                 Self::get_session_token(&client, maybe_code)
