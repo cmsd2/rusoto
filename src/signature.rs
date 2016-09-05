@@ -18,7 +18,7 @@ use openssl::crypto::hmac::hmac;
 use rustc_serialize::hex::ToHex;
 use time::Tm;
 use time::now_utc;
-use url::percent_encoding::{utf8_percent_encode, DEFAULT_ENCODE_SET, QUERY_ENCODE_SET};
+use url::percent_encoding::{utf8_percent_encode, EncodeSet, DEFAULT_ENCODE_SET, QUERY_ENCODE_SET};
 
 use credential::AwsCredentials;
 use param::Params;
@@ -206,10 +206,14 @@ impl <'a> SignedRequest <'a> {
 
         self.add_header("content-type", &ct);
 
+        debug!("canonical request: {}", canonical_request);
+
         // use the hashed canonical request to build the string to sign
         let hashed_canonical_request = to_hexdigest(&canonical_request);
         let scope = format!("{}/{}/{}/aws4_request", date.strftime("%Y%m%d").unwrap(), self.region, &self.service);
         let string_to_sign = string_to_sign(date, &hashed_canonical_request, &scope);
+
+        debug!("string to sign: {}", string_to_sign);
 
         // construct the signing key and sign the string with it
         let signing_key = signing_key(creds.aws_secret_access_key(), date, &self.region.to_string(), &self.service);
@@ -308,12 +312,29 @@ fn build_canonical_query_string(params: &Params) -> String {
         if !output.is_empty() {
             output.push_str("&");
         }
-        output.push_str(&byte_serialize(item.0));
+        output.push_str(&encode_strict(item.0));
         output.push_str("=");
-        output.push_str(&byte_serialize(item.1));
+        output.push_str(&encode_strict(item.1));
     }
 
     output
+}
+
+#[derive(Clone)]
+pub struct StrictEncodeSet;
+
+impl EncodeSet for StrictEncodeSet {
+    #[inline]
+    fn contains(&self, byte: u8) -> bool {
+        let upper = byte >= 0x41 && byte <= 0x5a;
+        let lower = byte >= 0x61 && byte <= 0x7a;
+        let numeric = byte >= 0x30 && byte <= 0x39;
+        let hyphen = byte == 0x2d;
+        let underscore = byte == 0x5f;
+        let tilde = byte == 0x7e;
+        let period = byte == 0x2e;
+        !(upper || lower || numeric || hyphen || underscore || tilde || period)
+    }
 }
 
 #[inline]
@@ -324,6 +345,11 @@ fn encode_uri(uri: &str) -> String {
 #[inline]
 fn byte_serialize(input: &str) -> String {
     utf8_percent_encode(input, DEFAULT_ENCODE_SET).collect::<String>()
+}
+
+#[inline]
+fn encode_strict(uri: &str) -> String {
+    utf8_percent_encode(uri, StrictEncodeSet).collect::<String>()
 }
 
 fn to_hexdigest<T: AsRef<[u8]>>(t: T) -> String {
@@ -382,10 +408,19 @@ mod tests {
     fn path_percent_encoded() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
         let mut request = SignedRequest::new("GET", "s3", Region::UsEast1, "/path with spaces");
         request.sign(provider.credentials().as_ref().unwrap());
         assert_eq!("/path%20with%20spaces", request.canonical_uri());
+    }
+
+    #[test]
+    fn query_percent_encoded() {
+        let mut request = SignedRequest::new("GET", "s3", Region::UsEast1, "/path with spaces");
+        request.add_param("key:with@funny&characters", "value with/funny%characters");
+        let canonical_query_string = super::build_canonical_query_string(&request.params);
+        assert_eq!("key%3Awith%40funny%26characters=value%20with%2Ffunny%25characters", canonical_query_string);
     }
 }

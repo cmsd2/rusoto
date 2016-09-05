@@ -387,6 +387,16 @@ pub struct ConfigProfile {
     pub region: Option<region::Region>,
 }
 
+impl Default for ConfigProfile {
+    fn default() -> ConfigProfile {
+        ConfigProfile {
+            role_arn: None,
+            source_profile: None,
+            region: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub default_region: Option<region::Region>,
@@ -446,7 +456,7 @@ fn parse_config_file(file_path: &Path) -> Result<Config, CredentialsError> {
 
 #[cfg(feature = "sts")]
 mod sts {
-    use super::{AwsCredentials, CredentialsError, ProvideAwsCredentials, ProfileProvider};
+    use super::{AwsCredentials, CredentialsError, ProvideAwsCredentials, ProfileProvider, ConfigProfile};
     use ::sts::{AssumeRoleRequest, GetSessionTokenRequest, StsClient};
     use ::Region;
     use std::path::{Path, PathBuf};
@@ -474,6 +484,7 @@ mod sts {
     #[derive(Debug, Clone)]
     pub struct StsProvider<P> where P: ProvideAwsCredentials + Clone {
         base_provider: P,
+        credentials_file_path: Option<PathBuf>,
         config_file_path: Option<PathBuf>,
         region: Option<Region>,
         role_arn: Option<String>,
@@ -496,12 +507,14 @@ mod sts {
     impl <P> StsProvider<P> where P: ProvideAwsCredentials + Clone {
         pub fn new(base_provider: P) -> Result<StsProvider<P>, CredentialsError> {
             let config_file_path = try!(ProfileProvider::default_config_path());
+            let credentials_file_path = try!(ProfileProvider::default_credentials_path());
 
             Ok(StsProvider {
                 base_provider: base_provider,
                 region: None,
                 role_arn: None,
                 profile: None,
+                credentials_file_path: Some(credentials_file_path),
                 config_file_path: Some(config_file_path),
                 session_name: None,
             })
@@ -532,11 +545,20 @@ mod sts {
             self.profile = profile;
         }
 
+        pub fn get_credentials_file_path(&self) -> Option<&Path> {
+            self.credentials_file_path.as_ref().map(|p| p.as_ref())
+        }
+
+        /// Set the credentials file path.
+        pub fn set_credentials_file_path(&mut self, credentials_file_path: Option<PathBuf>) {
+            self.credentials_file_path = credentials_file_path.into();
+        }
+
         pub fn get_config_file_path(&self) -> Option<&Path> {
             self.config_file_path.as_ref().map(|p| p.as_ref())
         }
 
-        /// Set the credentials file path.
+        /// Set the config file path.
         pub fn set_config_file_path(&mut self, config_file_path: Option<PathBuf>) {
             self.config_file_path = config_file_path.into();
         }
@@ -592,8 +614,14 @@ mod sts {
         fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
             // read ~/.aws/config
             let file_path = try!(self.config_file_path.as_ref().ok_or(CredentialsError::new("No StsProvider config_file_path set.")));
-            let config = try!(super::parse_config_file(&file_path));
+            let mut config = try!(super::parse_config_file(&file_path));
+            let credentials_file_path = try!(self.credentials_file_path.as_ref().ok_or(CredentialsError::new("No StsProvider credentials_file_path set.")));
+            let basic_profiles = try!(super::parse_credentials_file(&credentials_file_path));
             let default_region = config.default_region;
+
+            for (k, _creds) in basic_profiles {
+                config.profiles.entry(k).or_insert(ConfigProfile::default());
+            }
 
             // get named profile if any or default profile if present
             let profile: Option<&::credential::ConfigProfile>;
@@ -898,6 +926,7 @@ mod tests {
     fn profile_provider_happy_path() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
         let result = provider.credentials();
@@ -913,6 +942,7 @@ mod tests {
     fn profile_provider_bad_profile() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "not_a_profile",
         );
         let result = provider.credentials();
@@ -933,6 +963,7 @@ mod tests {
     fn credential_chain_explicit_profile_provider() {
         let profile_provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
 
