@@ -3,7 +3,7 @@
 extern crate rusoto;
 
 use rusoto::iam::IamClient;
-use rusoto::iam::{GetUserRequest, GetUserError};
+use rusoto::iam::{GetUserRequest, GetUserError, ListUsersRequest, ListUsersError};
 use rusoto::{DefaultCredentialsProvider, Region};
 
 #[test]
@@ -17,4 +17,17 @@ fn get_user() {
         ..Default::default()
     };
     iam.get_user(&request).unwrap();
+}
+
+#[test]
+fn list_users() {
+    let credentials = DefaultCredentialsProvider::new().unwrap();
+
+    let iam = IamClient::new(credentials, Region::UsEast1);
+
+    // http://docs.aws.amazon.com/IAM/latest/APIReference/Welcome.html
+    let request = ListUsersRequest {
+        ..Default::default()
+    };
+    iam.list_users(&request).unwrap();
 }
