@@ -287,23 +287,53 @@ fn generate_struct_deserializer(name: &str, shape: &Shape, service: &Service) ->
     )
 }
 
+fn generate_enter_list(shape: &Shape, tag_name: &str) -> Option<String> {
+    if member_location_name_for_shape(shape).is_some() {
+        Some(format!(
+            "try!(start_element(\"{tag_name}\", stack));",
+            tag_name = tag_name
+        ))
+    } else {
+        None
+    }
+}
+
+fn generate_leave_list(shape: &Shape, tag_name: &str) -> Option<String> {
+    if member_location_name_for_shape(shape).is_some() {
+        Some(format!(
+            "try!(end_element(\"{tag_name}\", stack));",
+            tag_name = tag_name
+        ))
+    } else {
+        None
+    }
+}
+
+fn member_location_name_for_shape(shape: &Shape) -> Option<&str> {
+    if shape.shape_type == ShapeType::List {
+        shape
+            .member
+            .as_ref()
+            .and_then(|m| m.location_name.as_ref().map(|s| &s[..]).or_else(|| Some("member")))
+    } else {
+        None
+    }
+}
+
 fn generate_struct_field_deserializers(shape: &Shape, service: &Service) -> String {
     shape.members.as_ref().unwrap().iter().map(|(member_name, member)| {
         // look up member.shape in all_shapes.  use that shape.member.location_name
-        let mut location_name = member_name.to_string();
+        let location_name = member_name.to_string();
 
-        let parse_expression_location_name = if let Some(ref child_shape) = service.shape_for_member(member) {
-            if child_shape.flattened.is_some() {
-                if let Some(ref child_member) = child_shape.member {
-                    if let Some(ref loc_name) = child_member.location_name {
-                        location_name = loc_name.to_string();
-                        Some(&location_name)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+        let maybe_child_shape = service.shape_for_member(member);
+        let maybe_child_member = maybe_child_shape.and_then(|s| s.member.as_ref());
+        let maybe_location_name = maybe_child_member.and_then(|m| m.location_name.as_ref());
+        let member_location_name = maybe_child_shape.and_then(|child_shape| member_location_name_for_shape(child_shape));
+        let parse_expression_location_name = if let Some(ref child_shape) = maybe_child_shape {
+            if child_shape.shape_type == ShapeType::List {  
+                member_location_name
+            } else if child_shape.flattened.is_some() {
+                maybe_location_name.map(|loc_name| { &loc_name[..] })
             } else {
                 None
             }
@@ -311,14 +341,18 @@ fn generate_struct_field_deserializers(shape: &Shape, service: &Service) -> Stri
             None
         };
         let parse_expression = generate_struct_field_parse_expression(shape, member_name, member, parse_expression_location_name);
-        format!(
-            "\"{location_name}\" => {{
+        format!("
+            \"{location_name}\" => {{
+                {enter_list}
                 obj.{field_name} = {parse_expression};
+                {leave_list}
                 continue;
             }}",
             field_name = member_name.to_snake_case(),
             parse_expression = parse_expression,
             location_name = location_name,
+            enter_list = maybe_child_shape.and_then(|s| generate_enter_list(s, &location_name)).unwrap_or(String::new()),
+            leave_list = maybe_child_shape.and_then(|s| generate_leave_list(s, &location_name)).unwrap_or(String::new()),
         )
 
     }).collect::<Vec<String>>().join("\n")
@@ -328,7 +362,7 @@ fn generate_struct_field_parse_expression(
     shape: &Shape,
     member_name: &str,
     member: &Member,
-    location_name: Option<&String>,
+    location_name: Option<&str>,
 ) -> String {
 
     let location_to_use = match location_name {
