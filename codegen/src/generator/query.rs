@@ -287,26 +287,18 @@ fn generate_struct_deserializer(name: &str, shape: &Shape, service: &Service) ->
     )
 }
 
-fn generate_enter_list(shape: &Shape, tag_name: &str) -> Option<String> {
-    if member_location_name_for_shape(shape).is_some() {
-        Some(format!(
-            "try!(start_element(\"{tag_name}\", stack));",
-            tag_name = tag_name
-        ))
-    } else {
-        None
-    }
+fn generate_enter_element(tag_name: &str) -> String {
+    format!(
+        "try!(start_element(\"{tag_name}\", stack));",
+        tag_name = tag_name
+    )
 }
 
-fn generate_leave_list(shape: &Shape, tag_name: &str) -> Option<String> {
-    if member_location_name_for_shape(shape).is_some() {
-        Some(format!(
-            "try!(end_element(\"{tag_name}\", stack));",
-            tag_name = tag_name
-        ))
-    } else {
-        None
-    }
+fn generate_leave_element(tag_name: &str) -> String {
+    format!(
+        "try!(end_element(\"{tag_name}\", stack));",
+        tag_name = tag_name
+    )
 }
 
 fn member_location_name_for_shape(shape: &Shape) -> Option<&str> {
@@ -325,22 +317,33 @@ fn generate_struct_field_deserializers(shape: &Shape, service: &Service) -> Stri
         // look up member.shape in all_shapes.  use that shape.member.location_name
         let location_name = member_name.to_string();
 
-        let maybe_child_shape = service.shape_for_member(member);
-        let maybe_child_member = maybe_child_shape.and_then(|s| s.member.as_ref());
-        let maybe_location_name = maybe_child_member.and_then(|m| m.location_name.as_ref());
-        let member_location_name = maybe_child_shape.and_then(|child_shape| member_location_name_for_shape(child_shape));
-        let parse_expression_location_name = if let Some(ref child_shape) = maybe_child_shape {
-            if child_shape.shape_type == ShapeType::List {  
-                member_location_name
-            } else if child_shape.flattened.is_some() {
-                maybe_location_name.map(|loc_name| { &loc_name[..] })
+        let maybe_member_shape = service.shape_for_member(member);
+        let maybe_child_member = maybe_member_shape.and_then(|s| s.member.as_ref());
+        let maybe_member_location_name = maybe_child_member.and_then(|m| m.location_name.as_ref());
+        let member_list_item_location_name = maybe_member_shape.and_then(|child_shape| member_location_name_for_shape(child_shape));
+
+        let mut member_list_name = &location_name[..];
+        let parse_expression_location_name;
+        let mut enter_list_expression = String::new();
+        let mut leave_list_expression = String::new();
+        
+        if let Some(ref child_shape) = maybe_member_shape {
+            if child_shape.flattened.unwrap_or(false) {
+                parse_expression_location_name = maybe_member_location_name.map(|loc_name| { &loc_name[..] });
+                member_list_name = member_list_item_location_name.unwrap_or(&location_name);
+            } else if child_shape.shape_type == ShapeType::List { 
+                parse_expression_location_name = member_list_item_location_name;
+                enter_list_expression = generate_enter_element(&location_name);
+                leave_list_expression = generate_leave_element(&location_name);
             } else {
-                None
+                parse_expression_location_name = None;
             }
         } else {
-            None
+            parse_expression_location_name = None;
         };
+
         let parse_expression = generate_struct_field_parse_expression(shape, member_name, member, parse_expression_location_name);
+
         format!("
             \"{location_name}\" => {{
                 {enter_list}
@@ -350,9 +353,9 @@ fn generate_struct_field_deserializers(shape: &Shape, service: &Service) -> Stri
             }}",
             field_name = member_name.to_snake_case(),
             parse_expression = parse_expression,
-            location_name = location_name,
-            enter_list = maybe_child_shape.and_then(|s| generate_enter_list(s, &location_name)).unwrap_or(String::new()),
-            leave_list = maybe_child_shape.and_then(|s| generate_leave_list(s, &location_name)).unwrap_or(String::new()),
+            location_name = member_list_name,
+            enter_list = enter_list_expression,
+            leave_list = leave_list_expression,
         )
 
     }).collect::<Vec<String>>().join("\n")
