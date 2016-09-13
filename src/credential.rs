@@ -382,14 +382,16 @@ impl LoadFromPath for Ini {
 
 #[derive(Debug, Clone)]
 pub struct ConfigProfile {
+    pub name: String,
     pub role_arn: Option<String>,
     pub source_profile: Option<String>,
     pub region: Option<region::Region>,
 }
 
-impl Default for ConfigProfile {
-    fn default() -> ConfigProfile {
+impl ConfigProfile {
+    pub fn new<S>(name: S) -> ConfigProfile where S: Into<String> {
         ConfigProfile {
+            name: name.into(),
             role_arn: None,
             source_profile: None,
             region: None,
@@ -439,7 +441,8 @@ fn parse_config_file(file_path: &Path) -> Result<Config, CredentialsError> {
                 let source_profile = section.get("source_profile").map(|s| s.to_owned());
                 let role_arn = section.get("role_arn").map(|s| s.to_owned());
 
-                profiles.insert(profile_name, ConfigProfile {
+                profiles.insert(profile_name.clone(), ConfigProfile {
+                    name: profile_name,
                     role_arn: role_arn,
                     source_profile: source_profile,
                     region: region,
@@ -620,7 +623,7 @@ mod sts {
             let default_region = config.default_region;
 
             for (k, _creds) in basic_profiles {
-                config.profiles.entry(k).or_insert(ConfigProfile::default());
+                config.profiles.entry(k.clone()).or_insert(ConfigProfile::new(k));
             }
 
             // get named profile if any or default profile if present
@@ -632,18 +635,26 @@ mod sts {
                 profile = config.profiles.get("default");
             }
 
+            debug!("StsProvider using profile {:?}", profile);
+
             // get region from profile unless overridden
             let region = self.region
                 .or_else(|| profile.and_then(|p| p.region))
                 .or_else(|| default_region)
                 .unwrap_or(Region::UsEast1);
+
+            debug!("StsProvider using region {:?}", region);
             
             // get role_arn from profile
             let maybe_role_arn = profile.and_then(|p| p.role_arn.as_ref());
+
+            debug!("StsProvider using role_arn {:?}", maybe_role_arn);
             
             let client = StsClient::new(self.base_provider.clone(), region);
 
             let session_name = self.get_session_name().unwrap_or(Self::default_session_name());
+
+            debug!("StsProvider using session_name {:?}", session_name);
 
             if let Some(role_arn) = maybe_role_arn {
                 Self::assume_role(&client, &role_arn[..], session_name)
