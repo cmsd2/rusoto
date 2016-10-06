@@ -10,6 +10,8 @@ extern crate lazy_static;
 extern crate regex;
 extern crate serde;
 extern crate serde_json;
+extern crate includedir;
+extern crate phf;
 
 #[cfg(not(feature = "serde_macros"))]
 extern crate serde_codegen;

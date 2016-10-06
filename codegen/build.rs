@@ -1,9 +1,28 @@
+mod include_tests {
+    extern crate includedir_codegen;
+
+    use self::includedir_codegen::Compression;
+
+    pub fn include_tests() {
+        includedir_codegen::start("TESTS")
+            .dir("tests", Compression::Gzip)
+            .build("tests.rs")
+            .unwrap();
+
+        includedir_codegen::start("BOTOCORE_TESTS")
+            .dir("botocore/tests/unit/response_parsing", Compression::Gzip)
+            .build("botocore_tests.rs")
+            .unwrap();
+    }
+}
+
 #[cfg(not(feature = "serde_macros"))]
 mod inner {
     extern crate serde_codegen;
 
     use std::env;
     use std::path::Path;
+    use include_tests;
 
     pub fn main() {
         let out_dir = env::var_os("OUT_DIR").unwrap();
@@ -12,11 +31,17 @@ mod inner {
         let dst = Path::new(&out_dir).join("botocore.rs");
 
         serde_codegen::expand(&src, &dst).unwrap();
+
+        include_tests::include_tests();
     }
 }
 #[cfg(feature = "serde_macros")]
 mod inner {
-    pub fn main() {}
+    use include_tests;
+
+    pub fn main() {
+        include_tests::include_tests()
+    }
 }
 
 fn main() {

@@ -1,5 +1,17 @@
 use std::fs;
+use std::str;
+use std::path::Path;
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use includedir::Files;
+
+mod botocore_tests {
+    include!(concat!(env!("OUT_DIR"), "/botocore_tests.rs"));
+}
+
+mod tests {
+    include!(concat!(env!("OUT_DIR"), "/tests.rs"));
+}
 
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
@@ -13,13 +25,13 @@ fn capitalise(s: &str) -> String {
 pub struct Response {
     pub service: String,
     pub action: String,
-    pub dir_name: String,
     pub file_name: String,
     pub extension: String,
+    pub content: String,
 }
 
 impl Response {
-    pub fn from_response_file_name(d: &str, f: &str) -> Option<Response> {
+    pub fn new_for_file(f: &str, content: &str) -> Option<Response> {
         let maybe_file_name_and_extension: Vec<&str> = f.split(".").collect();
 
         let mut service_name = None;
@@ -40,10 +52,10 @@ impl Response {
                     .and_then(|e|
                         Some(Response { 
                             service: s, 
-                            action: a, 
-                            dir_name: d.to_owned(),
+                            action: a,
                             file_name: f.to_owned(),
                             extension: e.to_string(),
+                            content: content.to_owned(),
                         })
                     )
                 )
@@ -51,13 +63,12 @@ impl Response {
     }
 }
 
-pub fn find_responses_in_dir(dir_name: &str) -> Vec<Response> {
-    let dir = fs::read_dir(dir_name)
-        .expect("read_dir");
-
-    dir
-        .map(|d| d.expect("direntry").file_name().into_string().expect("osstr"))
-        .flat_map(|f| Response::from_response_file_name(dir_name, &f))
+pub fn find_responses_in_files(files: &'static Files) -> Vec<Response> {
+    files.file_names()
+        
+        .map(|f| (Path::new(f).file_name().expect("osstr").to_str().expect("osstr::to_str").to_owned(), 
+            str::from_utf8(files.get(f).expect("includdir get").borrow()).expect("str::from_utf8")))
+        .flat_map(|(ref f,content)| Response::new_for_file(&f, content))
         .filter(|r| r.extension == "xml")
         .collect()
 }
@@ -65,11 +76,11 @@ pub fn find_responses_in_dir(dir_name: &str) -> Vec<Response> {
 pub fn find_responses() -> HashMap<String, Response> {
     let mut responses = HashMap::new();
 
-    for r in find_responses_in_dir("./codegen/botocore/tests/unit/response_parsing/xml/responses").into_iter() {
+    for r in find_responses_in_files(&self::botocore_tests::BOTOCORE_TESTS) {
         responses.insert(r.file_name.clone(), r);
     }
 
-    for r in find_responses_in_dir("./codegen/tests/unit/responses").into_iter() {
+    for r in find_responses_in_files(&self::tests::TESTS) {
         responses.insert(r.file_name.clone(), r);
     }
 

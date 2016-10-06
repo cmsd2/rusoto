@@ -6,17 +6,23 @@ license = "MIT"
 name = "rusoto_codegen"
 repository = "https://github.com/rusoto/rusoto"
 version = "0.2.5"
+include = ["tests", "botocore/tests/unit/response_parsing"]
+
+[build-dependencies]
+includedir_codegen = "0.2.0"
 
 [build-dependencies.serde_codegen]
 optional = true
 version = "0.8.0"
 
 [dependencies]
-Inflector = "0.2.0"
+Inflector = { github = "https://github.com/whatisinternet/inflector.git", rev = "b657625bf704534324470d37512e89d4136269a0" }
 lazy_static = "0.1.16"
 regex = "0.1.65"
 serde = "0.8.0"
 serde_json = "0.8.0"
+includedir = "0.2.0"
+phf = "0.7.12"
 
 [dependencies.clippy]
 optional = true
