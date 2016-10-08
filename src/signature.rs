@@ -428,6 +428,7 @@ mod tests {
     fn path_percent_encoded() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
         let mut request = SignedRequest::new("GET", "s3", Region::UsEast1, "/path with spaces: the sequel");

@@ -14,12 +14,16 @@ use std::ascii::AsciiExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::cell::RefCell;
+use std::str::FromStr;
 use hyper::Client;
 use hyper::header::Connection;
 use regex::Regex;
 use chrono::{Duration, UTC, DateTime, ParseError};
 use serde_json::{Value, from_str};
 use std::time::Duration as StdDuration;
+use ini::Ini;
+use ini::ini;
+use region;
 
 /// AWS API access credentials, including access key, secret key, token (for IAM profiles), and
 /// expiration timestamp.
@@ -78,9 +82,9 @@ pub struct CredentialsError{
 }
 
 impl CredentialsError {
-    fn new(message: &str) -> CredentialsError {
+    pub fn new<S>(message: S) -> CredentialsError where S: Into<String> {
         CredentialsError {
-            message: message.to_string()
+            message: message.into()
         }
     }
 }
@@ -109,6 +113,17 @@ impl From<IoError> for CredentialsError {
     }
 }
 
+impl From<ini::Error> for CredentialsError {
+    fn from(err: ini::Error) -> CredentialsError {
+        CredentialsError::new(err.description())
+    }
+}
+
+impl From<region::ParseRegionError> for CredentialsError {
+    fn from(err: region::ParseRegionError) -> CredentialsError {
+        CredentialsError::new(err.description())
+    }
+}
 
 /// A trait for types that produce `AwsCredentials`.
 pub trait ProvideAwsCredentials {
@@ -160,40 +175,56 @@ fn credentials_from_environment() -> Result<AwsCredentials, CredentialsError> {
 pub struct ProfileProvider {
     credentials: Option<AwsCredentials>,
     file_path: PathBuf,
+    config_file_path: PathBuf,
     profile: String,
 }
 
 impl ProfileProvider {
     /// Create a new `ProfileProvider` for the default credentials file path and profile name.
     pub fn new() -> Result<ProfileProvider, CredentialsError> {
-        // Default credentials file location:
-        // ~/.aws/credentials (Linux/Mac)
-        // %USERPROFILE%\.aws\credentials  (Windows)
-        let profile_location = match env::home_dir() {
-            Some(home_path) => {
-                let mut credentials_path = PathBuf::from(".aws");
-
-                credentials_path.push("credentials");
-
-                home_path.join(credentials_path)
-            }
-            None => return Err(CredentialsError::new("The environment variable HOME must be set.")),
-        };
+        let profile_location = try!(Self::default_credentials_path());
+        let config_location = try!(Self::default_config_path());
 
         Ok(ProfileProvider {
             credentials: None,
             file_path: profile_location,
+            config_file_path: config_location,
             profile: "default".to_owned(),
         })
     }
 
+    pub fn default_dot_aws_location() -> Result<PathBuf, CredentialsError> {
+         // Default credentials file location:
+        // ~/.aws/credentials (Linux/Mac)
+        // %USERPROFILE%\.aws\credentials  (Windows)
+        match env::home_dir() {
+            Some(home_path) => Ok(home_path.join(PathBuf::from(".aws"))),
+            None => Err(CredentialsError::new("The environment variable HOME must be set.")),
+        }
+    }
+
+    pub fn default_credentials_path() -> Result<PathBuf, CredentialsError> {
+        let dot_aws_location = try!(Self::default_dot_aws_location());
+        let mut profile_location = dot_aws_location.clone();
+        profile_location.push("credentials");
+        Ok(profile_location)
+    }
+
+    pub fn default_config_path() -> Result<PathBuf, CredentialsError> {
+        let dot_aws_location = try!(Self::default_dot_aws_location());
+        let mut profile_location = dot_aws_location.clone();
+        profile_location.push("config");
+        Ok(profile_location)
+    }
+
     /// Create a new `ProfileProvider` for the credentials file at the given path, using
     /// the given profile.
-    pub fn with_configuration<F, P>(file_path: F, profile: P) -> ProfileProvider
-    where F: Into<PathBuf>, P: Into<String> {
+    pub fn with_configuration<F, C, P>(file_path: F, config_file_path: C, profile: P) -> ProfileProvider
+    where F: Into<PathBuf>, C: Into<PathBuf>, P: Into<String> {
         ProfileProvider {
             credentials: None,
             file_path: file_path.into(),
+            config_file_path: config_file_path.into(),
             profile: profile.into(),
         }
     }
@@ -201,6 +232,11 @@ impl ProfileProvider {
     /// Get a reference to the credentials file path.
     pub fn file_path(&self) -> &Path {
         self.file_path.as_ref()
+    }
+
+    /// Get a reference to the config file path.
+    pub fn config_file_path(&self) -> &Path {
+        self.config_file_path.as_ref()
     }
 
     /// Get a reference to the profile name.
@@ -213,6 +249,11 @@ impl ProfileProvider {
         self.file_path = file_path.into();
     }
 
+    /// Set the credentials file path.
+    pub fn set_config_file_path<F>(&mut self, config_file_path: F) where F: Into<PathBuf> {
+        self.config_file_path = config_file_path.into();
+    }
+
     /// Set the profile name.
     pub fn set_profile<P>(&mut self, profile: P) where P: Into<String> {
         self.profile = profile.into();
@@ -221,89 +262,202 @@ impl ProfileProvider {
 
 impl ProvideAwsCredentials for ProfileProvider {
     fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
-    	parse_credentials_file(self.file_path()).and_then(|mut profiles| {
-            profiles.remove(self.profile()).ok_or(CredentialsError::new("profile not found"))
+        let config = try!(Config::parse_config_file(self.config_file_path()));
+
+        let mut profile_name: Option<&str> = config.profiles.get(self.profile()).and_then(|p| {
+            p.source_profile.as_ref().map(|s| &s[..])
+        });
+
+        profile_name = profile_name.or_else(|| Some(self.profile()));
+
+    	CredentialsParser::parse_credentials_file(self.file_path()).and_then(|mut profiles| {
+            profiles.remove(profile_name.unwrap()).ok_or(CredentialsError::new("profile not found"))
     	})
    }
 }
 
-fn parse_credentials_file(file_path: &Path) -> Result<HashMap<String, AwsCredentials>, CredentialsError> {
-    match fs::metadata(file_path) {
-        Err(_) => return Err(CredentialsError::new("Couldn't stat credentials file.")),
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return Err(CredentialsError::new("Couldn't open file."));
+pub struct CredentialsParser;
+
+impl CredentialsParser {
+    pub fn parse_credentials_file(file_path: &Path) -> Result<HashMap<String, AwsCredentials>, CredentialsError> {
+        match fs::metadata(file_path) {
+            Err(_) => return Err(CredentialsError::new("Couldn't stat credentials file.")),
+            Ok(metadata) => {
+                if !metadata.is_file() {
+                    return Err(CredentialsError::new("Couldn't open file."));
+                }
             }
-        }
-    };
+        };
 
-    let file = try!(File::open(file_path));
+        let file = try!(File::open(file_path));
 
-    let profile_regex = Regex::new(r"^\[([^\]]+)\]$").unwrap();
-    let mut profiles: HashMap<String, AwsCredentials> = HashMap::new();
-    let mut access_key: Option<String> = None;
-    let mut secret_key: Option<String> = None;
-    let mut profile_name: Option<String> = None;
+        let profile_regex = Regex::new(r"^\[([^\]]+)\]$").unwrap();
+        let mut profiles: HashMap<String, AwsCredentials> = HashMap::new();
+        let mut access_key: Option<String> = None;
+        let mut secret_key: Option<String> = None;
+        let mut profile_name: Option<String> = None;
 
-    let file_lines = BufReader::new(&file);
-    for line in file_lines.lines() {
+        let file_lines = BufReader::new(&file);
+        for line in file_lines.lines() {
 
-        let unwrapped_line : String = line.unwrap();
+            let unwrapped_line : String = line.unwrap();
 
-        // skip comments
-        if unwrapped_line.starts_with('#') {
-            continue;
-        }
-
-        // handle the opening of named profile blocks
-        if profile_regex.is_match(&unwrapped_line) {
-
-            if profile_name.is_some() && access_key.is_some() && secret_key.is_some() {
-                let creds = AwsCredentials::new(access_key.unwrap(), secret_key.unwrap(), None, in_ten_minutes());
-                profiles.insert(profile_name.unwrap(), creds);
+            // skip comments
+            if unwrapped_line.starts_with('#') {
+                continue;
             }
 
-            access_key = None;
-            secret_key = None;
+            // handle the opening of named profile blocks
+            if profile_regex.is_match(&unwrapped_line) {
 
-            let caps = profile_regex.captures(&unwrapped_line).unwrap();
-            profile_name = Some(caps.at(1).unwrap().to_string());
-            continue;
+                if profile_name.is_some() && access_key.is_some() && secret_key.is_some() {
+                    let creds = AwsCredentials::new(access_key.unwrap(), secret_key.unwrap(), None, in_ten_minutes());
+                    profiles.insert(profile_name.unwrap(), creds);
+                }
+
+                access_key = None;
+                secret_key = None;
+
+                let caps = profile_regex.captures(&unwrapped_line).unwrap();
+                profile_name = Some(caps.at(1).unwrap().to_string());
+                continue;
+            }
+
+            // otherwise look for key=value pairs we care about
+            let lower_case_line = unwrapped_line.to_ascii_lowercase().to_string();
+
+            if lower_case_line.contains("aws_access_key_id") &&
+                access_key.is_none()
+            {
+                let v: Vec<&str> = unwrapped_line.split('=').collect();
+                if !v.is_empty() {
+                    access_key = Some(v[1].trim_matches(' ').to_string());
+                }
+            } else if lower_case_line.contains("aws_secret_access_key") &&
+                secret_key.is_none()
+            {
+                let v: Vec<&str> = unwrapped_line.split('=').collect();
+                if !v.is_empty() {
+                    secret_key = Some(v[1].trim_matches(' ').to_string());
+                }
+            }
+
+            // we could potentially explode here to indicate that the file is invalid
+
         }
 
-        // otherwise look for key=value pairs we care about
-        let lower_case_line = unwrapped_line.to_ascii_lowercase().to_string();
-
-        if lower_case_line.contains("aws_access_key_id") &&
-            access_key.is_none()
-        {
-            let v: Vec<&str> = unwrapped_line.split('=').collect();
-            if !v.is_empty() {
-                access_key = Some(v[1].trim_matches(' ').to_string());
-            }
-        } else if lower_case_line.contains("aws_secret_access_key") &&
-            secret_key.is_none()
-        {
-            let v: Vec<&str> = unwrapped_line.split('=').collect();
-            if !v.is_empty() {
-                secret_key = Some(v[1].trim_matches(' ').to_string());
-            }
+        if profile_name.is_some() && access_key.is_some() && secret_key.is_some() {
+            let creds = AwsCredentials::new(access_key.unwrap(), secret_key.unwrap(), None, in_ten_minutes());
+            profiles.insert(profile_name.unwrap(), creds);
         }
 
-        // we could potentially explode here to indicate that the file is invalid
+        if profiles.is_empty() {
+            return Err(CredentialsError::new("No credentials found."));
+        }
 
+        Ok(profiles)
+    }
+}
+
+pub trait LoadFromPath where Self: Sized {
+    type Error: Sized + 'static;
+
+    fn load_from_path(filename: &Path) -> Result<Self, Self::Error>;
+}
+
+impl LoadFromPath for Ini {
+    type Error = ini::Error;
+
+    fn load_from_path(filename: &Path) -> Result<Ini, Self::Error> {
+        let mut reader = match File::open(filename) {
+            Err(e) => {
+                return Err(ini::Error {
+                    line: 0,
+                    col: 0,
+                    msg: format!("Unable to open `{:?}`: {}", filename, e),
+                })
+            }
+            Ok(r) => r,
+        };
+        Ini::read_from(&mut reader)
+    }
+}
+
+pub struct ConfigProfile {
+    pub name: String,
+    pub role_arn: Option<String>,
+    pub source_profile: Option<String>,
+    pub region: Option<region::Region>,
+}
+
+impl ConfigProfile {
+    pub fn new<S>(name: S) -> ConfigProfile where S: Into<String> {
+        ConfigProfile {
+            name: name.into(),
+            role_arn: None,
+            source_profile: None,
+            region: None,
+        }
+    }
+}
+
+pub struct Config {
+    pub default_region: Option<region::Region>,
+    pub profiles: HashMap<String, ConfigProfile>,
+}
+
+impl Config {
+    pub fn get_profile_name_from_section_name(section_name: &str) -> Option<String> {
+        let prefix = "profile ";
+        if section_name.starts_with(prefix) {
+            Some(section_name.chars().skip(prefix.len()).collect())
+        } else {
+            None
+        }
     }
 
-    if profile_name.is_some() && access_key.is_some() && secret_key.is_some() {
-        let creds = AwsCredentials::new(access_key.unwrap(), secret_key.unwrap(), None, in_ten_minutes());
-        profiles.insert(profile_name.unwrap(), creds);
-    }
+    pub fn parse_config_file(file_path: &Path) -> Result<Config, CredentialsError> {
+        let ini = try!(Ini::load_from_path(file_path));
 
-    if profiles.is_empty() {
-        return Err(CredentialsError::new("No credentials found."));
-    }
+        let default_section = ini.section(Some("default".to_owned()));
+        let maybe_default_region_name = default_section.and_then(|s| s.get("region"));
+        let default_region = if let Some(default_region_name) = maybe_default_region_name {
+            Some(try!(region::Region::from_str(default_region_name)))
+        } else {
+            None
+        };
 
-    Ok(profiles)
+        let mut profiles = HashMap::new();
+
+        for key in ini.sections() {
+            if let Some(section_name) = key.as_ref() {  
+                let section = ini.section(key.to_owned()).unwrap();
+
+                if let Some(profile_name) = Config::get_profile_name_from_section_name(section_name) {
+                    let maybe_region_name = section.get("region");
+                    let region = if let Some(region_name) = maybe_region_name {
+                        Some(try!(region::Region::from_str(region_name)))
+                    } else {
+                        None
+                    };
+                    let source_profile = section.get("source_profile").map(|s| s.to_owned());
+                    let role_arn = section.get("role_arn").map(|s| s.to_owned());
+
+                    profiles.insert(profile_name.clone(), ConfigProfile {
+                        name: profile_name,
+                        role_arn: role_arn,
+                        source_profile: source_profile,
+                        region: region,
+                    });
+                }
+            }
+        }
+
+        Ok(Config {
+            default_region: default_region,
+            profiles: profiles,
+        })
+    }
 }
 
 /// Provides AWS credentials from a resource's IAM role.
@@ -384,6 +538,15 @@ impl ProvideAwsCredentials for IamProvider {
 pub struct BaseAutoRefreshingProvider<P, T> {
 	credentials_provider: P,
 	cached_credentials: T
+}
+
+impl <P,T> Clone for BaseAutoRefreshingProvider<P,T> where P: Clone, T: Clone {
+    fn clone(&self) -> BaseAutoRefreshingProvider<P,T> {
+        BaseAutoRefreshingProvider {
+            credentials_provider: self.credentials_provider.clone(),
+            cached_credentials: self.cached_credentials.clone(),
+        }
+    }
 }
 
 /// Threadsafe `AutoRefreshingProvider` that locks cached credentials with a `Mutex`
@@ -527,7 +690,7 @@ mod tests {
 
     #[test]
     fn parse_credentials_file_default_profile() {
-        let result = super::parse_credentials_file(
+        let result = CredentialsParser::parse_credentials_file(
             Path::new("tests/sample-data/default_profile_credentials")
         );
         assert!(result.is_ok());
@@ -542,7 +705,7 @@ mod tests {
 
     #[test]
     fn parse_credentials_file_multiple_profiles() {
-        let result = super::parse_credentials_file(
+        let result = CredentialsParser::parse_credentials_file(
             Path::new("tests/sample-data/multiple_profile_credentials")
         );
         assert!(result.is_ok());
@@ -564,6 +727,7 @@ mod tests {
     fn profile_provider_happy_path() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
         let result = provider.credentials();
@@ -579,6 +743,7 @@ mod tests {
     fn profile_provider_bad_profile() {
         let provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "not_a_profile",
         );
         let result = provider.credentials();
@@ -599,6 +764,7 @@ mod tests {
     fn credential_chain_explicit_profile_provider() {
         let profile_provider = ProfileProvider::with_configuration(
             "tests/sample-data/multiple_profile_credentials",
+            "tests/sample-data/empty_config",
             "foo",
         );
 
@@ -614,19 +780,19 @@ mod tests {
 
     #[test]
     fn existing_file_no_credentials() {
-        let result = super::parse_credentials_file(Path::new("tests/sample-data/no_credentials"));
+        let result = CredentialsParser::parse_credentials_file(Path::new("tests/sample-data/no_credentials"));
         assert_eq!(result.err(), Some(CredentialsError::new("No credentials found.")))
     }
 
     #[test]
     fn parse_credentials_bad_path() {
-        let result = super::parse_credentials_file(Path::new("/bad/file/path"));
+        let result = CredentialsParser::parse_credentials_file(Path::new("/bad/file/path"));
         assert_eq!(result.err(), Some(CredentialsError::new("Couldn't stat credentials file.")));
     }
 
     #[test]
     fn parse_credentials_directory_path() {
-        let result = super::parse_credentials_file(Path::new("tests/"));
+        let result = CredentialsParser::parse_credentials_file(Path::new("tests/"));
         assert_eq!(result.err(), Some(CredentialsError::new("Couldn't open file.")));
     }
 }

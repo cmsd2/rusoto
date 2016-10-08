@@ -56,6 +56,7 @@ extern crate serde_json;
 extern crate time;
 extern crate url;
 extern crate xml;
+extern crate ini;
 
 pub use credential::{
     AwsCredentials,
@@ -68,6 +69,10 @@ pub use credential::{
     DefaultCredentialsProvider,
     DefaultCredentialsProviderSync,
 };
+
+#[cfg(feature = "sts")]
+pub use sts::StsProvider;
+
 pub use region::{ParseRegionError, Region};
 pub use request::{DispatchSignedRequest, HttpResponse, HttpDispatchError};
 pub use signature::SignedRequest;
@@ -154,6 +159,8 @@ pub mod sqs;
 pub mod ssm;
 #[cfg(feature = "storagegateway")]
 pub mod storagegateway;
+#[cfg(feature = "sts")]
+pub mod sts;
 #[cfg(feature = "swf")]
 pub mod swf;
 #[cfg(feature = "waf")]
